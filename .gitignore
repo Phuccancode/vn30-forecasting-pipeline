@@ -1,0 +1,50 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*.pem
+*.key
+*.pfx
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Airflow runtime
+airflow.db
+airflow-webserver.pid
+logs/
+
+# Spark temporary output
+spark-warehouse/
+
+# Docker / local runtime artifacts
+*.log
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Local override files
+*.local

@@ -1,0 +1,15 @@
+# Core data processing
+pandas
+pyarrow
+PyYAML
+vnstock
+
+# Azure
+azure-storage-blob
+pyodbc
+
+# Transformation / serving (from project scope)
+pyspark
+SQLAlchemy
+streamlit
+plotly
