@@ -37,7 +37,7 @@ def fetch_data_with_retry(ticker: str, start_date: str, end_date: str, max_retri
                 .stock(symbol=ticker, source="KBS")
                 .quote.history(start=start_date, end=end_date, interval="1D")
             )
-            
+
             if df is not None and not df.empty:
                 logger.info(f"Successfully fetched {len(df)} records for {ticker}")
                 return df
@@ -60,36 +60,41 @@ def process_and_upload(df: pd.DataFrame, ticker: str, start_date: str, target_da
     if df.empty:
         return
 
-    # Create local temp directory
-    temp_dir = "/tmp/vn30_raw"
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    local_file = os.path.join(temp_dir, f"{ticker}_{start_date}_{target_date}.parquet")
-    
-    # Standardize column names
     df.columns = [col.capitalize() for col in df.columns]
-    
-    # Save to parquet
-    df.to_parquet(local_file, index=False)
-    
-    # Upload to Azure Blob Storage
-    # Target path: raw/YYYY/MM/DD/TICKER.parquet based on execution target date
-    dt = datetime.strptime(target_date, "%Y-%m-%d")
-    blob_name = f"{dt.year}/{dt.month:02d}/{dt.day:02d}/{ticker}.parquet"
-    
-    success = upload_parquet_to_blob(
-        local_file_path=local_file,
-        container_name="raw",
-        blob_name=blob_name,
-        overwrite=True
-    )
-    
-    if success:
-        # Clean up local file 
-        os.remove(local_file)
-    else:
-        logger.error(f"Failed to upload {ticker}. Local file kept at {local_file}")
+    # 1) Chuẩn hóa cột ngày về trade_date
+    date_col = "Date" if "Date" in df.columns else "Time"  
+    df["Trade_date"] = pd.to_datetime(df[date_col]).dt.date
 
+    
+
+    logger.debug(f"Data for {ticker} after adding trade_date:\n{df.head()}")
+
+    os.makedirs("/tmp/vn30_raw", exist_ok=True)
+
+    # 2) Ghi theo từng trade_date
+    for trade_date, part in df.groupby("Trade_date"):
+        # giữ 1 dòng duy nhất cho mỗi ticker + trade_date
+        part = (
+            part.sort_values(by=[date_col])     # hoặc thêm cột updated_at nếu có
+                .drop_duplicates(subset=["Trade_date"], keep="last")
+        )
+        local_file = f"/tmp/vn30_raw/{ticker}_{trade_date}.parquet"
+        part.to_parquet(local_file, index=False)
+
+        blob_name = f"{trade_date:%Y/%m/%d}/{ticker}.parquet"   # theo trade date
+        success = upload_parquet_to_blob(
+            local_file_path=local_file,
+            container_name="raw",
+            blob_name=blob_name,
+            overwrite=True
+        )
+        if success:
+            # Clean up local file 
+            os.remove(local_file)
+        else:
+            logger.error(f"Failed to upload {ticker}. Local file kept at {local_file}")
+
+    
 def main():
     parser = argparse.ArgumentParser(description="Extract VN30 data from vnstock API")
     parser.add_argument("--mode", type=str, choices=["daily", "backfill"], required=True, 
@@ -117,6 +122,7 @@ def main():
 
     for ticker in tickers:
         df = fetch_data_with_retry(ticker, start_date, target_date)
+        logger.info(f"Fetched {len(df)} records for {ticker}")
         
         if not df.empty:
             process_and_upload(df, ticker, start_date, target_date)
