@@ -32,9 +32,9 @@
 - **Deliverable:** Rerunnable Bronze process with deterministic outputs.
 
 ### Day 5 - March 27, 2026: Silver Transformation v1
-- [ ] Build PySpark cleaning pipeline.
-- [ ] Normalize schema, handle missing values, cast data types.
-- [ ] Compute moving averages for analytics readiness.
+- [x] Build PySpark cleaning pipeline.
+- [x] Normalize schema, handle missing values, cast data types.
+- [x] Compute moving averages (`MA10`, `MA20`, `MA50`, `MA200`) for analytics readiness.
 - **Deliverable:** Processed Silver Parquet written to `processed` container.
 
 ### Day 6 - March 28, 2026: Silver Data Quality

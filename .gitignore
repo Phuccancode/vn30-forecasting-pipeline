@@ -48,3 +48,5 @@ spark-warehouse/
 
 # Local override files
 *.local
+
+.codex
