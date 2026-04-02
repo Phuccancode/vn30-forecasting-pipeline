@@ -26,9 +26,9 @@
 - **Deliverable:** First successful raw load to Blob Storage.
 
 ### Day 4 - March 26, 2026: Bronze Hardening
-- [ ] Add idempotency checks (safe reruns, no duplicate raw records).
-- [ ] Add backfill capability for historical dates.
-- [ ] Validate partition naming and storage structure.
+- [x] Add idempotency checks (safe reruns, no duplicate raw records).
+- [x] Add backfill capability for historical dates.
+- [x] Validate partition naming and storage structure.
 - **Deliverable:** Rerunnable Bronze process with deterministic outputs.
 
 ### Day 5 - March 27, 2026: Silver Transformation v1
