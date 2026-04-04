@@ -39,8 +39,7 @@ def fetch_data_with_retry(ticker: str, start_date: str, end_date: str, max_retri
         try:
             logger.info(f"Fetching {ticker} from {start_date} to {end_date} (Attempt {attempt+1}/{max_retries})...")
             df = (
-                Quote()
-                .stock(symbol=ticker, source="KBS")
+                Quote(symbol=ticker, source="KBS")
                 .history(start=start_date, end=end_date, interval="1H")
             )
 
