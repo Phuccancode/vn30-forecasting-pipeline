@@ -1,5 +1,7 @@
 import os
 import logging
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from azure.storage.blob import BlobServiceClient
 from azure.core.exceptions import ResourceExistsError
 from dotenv import load_dotenv
@@ -48,6 +50,76 @@ def upload_parquet_to_blob(local_file_path: str, container_name: str, blob_name:
         
     except Exception as e:
         logger.error(f"Failed to upload '{blob_name}': {e}")
+        return False
+
+
+def upload_directory_to_blob(
+    local_dir_path: str,
+    container_name: str,
+    prefix: str = "",
+    overwrite: bool = True,
+    max_workers: int = 8,
+) -> bool:
+    """
+    Upload parquet files from a local directory recursively to Azure Blob Storage.
+
+    Args:
+        local_dir_path: Directory containing parquet files
+        container_name: Azure container name
+        prefix: Optional blob prefix inside container
+        overwrite: Whether to overwrite existing blobs
+        max_workers: Number of parallel upload workers
+    """
+    try:
+        root = Path(local_dir_path)
+        if not root.exists() or not root.is_dir():
+            logger.warning(f"Directory not found or not a directory: {local_dir_path}")
+            return False
+
+        files = [p for p in root.rglob("*.parquet") if p.is_file()]
+        if not files:
+            logger.warning(f"No parquet files found in {local_dir_path}")
+            return False
+
+        blob_service_client = get_blob_service_client()
+        container_client = blob_service_client.get_container_client(container_name)
+
+        try:
+            container_client.create_container()
+            logger.info(f"Created container '{container_name}'")
+        except ResourceExistsError:
+            pass
+
+        def _upload_file(file_path: Path):
+            relative_path = file_path.relative_to(root).as_posix()
+            blob_name = f"{prefix.strip('/')}/{relative_path}" if prefix else relative_path
+            with file_path.open("rb") as data:
+                container_client.get_blob_client(blob_name).upload_blob(data, overwrite=overwrite)
+            return blob_name
+
+        uploaded = 0
+        failed = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_upload_file, file_path): file_path for file_path in files}
+            for future in as_completed(futures):
+                file_path = futures[future]
+                try:
+                    blob_name = future.result()
+                    uploaded += 1
+                    logger.info(f"Uploaded '{file_path}' -> '{blob_name}'")
+                except Exception as exc:
+                    failed += 1
+                    logger.error(f"Failed to upload '{file_path}': {exc}")
+
+        logger.info(
+            "Directory upload completed. uploaded=%s failed=%s total=%s",
+            uploaded,
+            failed,
+            len(files),
+        )
+        return failed == 0
+    except Exception as e:
+        logger.error(f"Failed directory upload from '{local_dir_path}': {e}")
         return False
         
 def check_blob_exists(container_name: str, blob_name: str) -> bool:
