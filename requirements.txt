@@ -5,6 +5,7 @@ PyYAML
 vnstock
 
 # Azure
+dotenv
 azure-storage-blob
 pyodbc
 
@@ -13,3 +14,5 @@ pyspark
 SQLAlchemy
 streamlit
 plotly
+
+dotenv
