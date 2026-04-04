@@ -35,7 +35,7 @@ def get_spark_session():
 spark = get_spark_session()
 storage_account = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
 BASE_PATH_RAW = f"abfss://raw@{storage_account}.dfs.core.windows.net"
-BASE_PATH_PROCESSED = f"abfss://processed@{storage_account}.dfs.core.windows.net"
+BASE_PATH_PROCESSED = f"abfss://processed@{storage_account}.dfs.core.windows.net/silver"
 
 df = (
     spark.read
@@ -106,8 +106,8 @@ df_ffill = df_ffill.dropna(subset=["open","high","low","close"])
 output_path = f"{BASE_PATH_PROCESSED}"
 (
     df_ffill
-    .write
     .repartition(16, "ticker")
+    .write
     .mode("overwrite")
     .partitionBy("ticker")
     .parquet(output_path)
