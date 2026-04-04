@@ -26,15 +26,15 @@
 - **Deliverable:** First successful raw load to Blob Storage.
 
 ### Day 4 - March 26, 2026: Bronze Hardening
-- [ ] Add idempotency checks (safe reruns, no duplicate raw records).
-- [ ] Add backfill capability for historical dates.
-- [ ] Validate partition naming and storage structure.
+- [x] Add idempotency checks (safe reruns, no duplicate raw records).
+- [x] Add backfill capability for historical dates.
+- [x] Validate partition naming and storage structure.
 - **Deliverable:** Rerunnable Bronze process with deterministic outputs.
 
 ### Day 5 - March 27, 2026: Silver Transformation v1
-- [ ] Build PySpark cleaning pipeline.
-- [ ] Normalize schema, handle missing values, cast data types.
-- [ ] Compute moving averages for analytics readiness.
+- [x] Build PySpark cleaning pipeline.
+- [x] Normalize schema, handle missing values, cast data types.
+- [x] Compute moving averages (`MA10`, `MA20`, `MA50`, `MA200`) for analytics readiness.
 - **Deliverable:** Processed Silver Parquet written to `processed` container.
 
 ### Day 6 - March 28, 2026: Silver Data Quality
