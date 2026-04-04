@@ -108,7 +108,7 @@ def main():
                         help="Number of tickers per ingestion/upload batch.")
     parser.add_argument("--upload-workers", type=int, default=8,
                         help="Parallel workers for uploading parquet files to Azure Blob.")
-    parser.add_argument("--sleep-between-tickers", type=float, default=0.8,
+    parser.add_argument("--sleep-between-tickers", type=float, default=3.0,
                         help="Sleep seconds after each ticker fetch for rate-limit protection.")
     parser.add_argument("--sleep-between-batches", type=float, default=2.0,
                         help="Sleep seconds after each batch upload.")
