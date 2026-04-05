@@ -99,7 +99,7 @@ def upload_directory_to_blob(
 
         uploaded = 0
         failed = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=None) as executor:
             futures = {executor.submit(_upload_file, file_path): file_path for file_path in files}
             for future in as_completed(futures):
                 file_path = futures[future]
