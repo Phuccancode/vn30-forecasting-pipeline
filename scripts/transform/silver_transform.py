@@ -38,7 +38,6 @@ def get_spark_session():
         .appName("VN30 Stock Analysis")
         .config("spark.jars.packages", "org.apache.hadoop:hadoop-azure:3.4.1")
         .config("spark.sql.legacy.parquet.nanosAsLong", "true")
-        .config("spark.ui.showConsoleProgress", "true")
         .getOrCreate()
     )
     

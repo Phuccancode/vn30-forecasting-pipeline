@@ -1,8 +1,26 @@
 from pyspark.sql import SparkSession
+from time import perf_counter
 # Load .env
 from dotenv import load_dotenv
 load_dotenv()
 import os
+import logging
+
+logging.basicConfig(
+    level='INFO',
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("get_data_from_processed")
+
+def step_timer(label: str):
+    start = perf_counter()
+    logger.info(f"START: {label}")
+    return start
+
+def finish_step(label: str, start_time: float) -> None:
+    elapsed = perf_counter() - start_time
+    logger.info(f"DONE: {label} ({elapsed:.2f}s)")
 
 def get_spark_session():
     storage_account = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
@@ -38,8 +56,13 @@ df = (
     .option("recursiveFileLookup", "true")
     .option("pathGlobFilter", "*.parquet")
     .parquet(
-        f"{BASE_PATH_PROCESSED}/2026"
+        f"{BASE_PATH_PROCESSED}/silver"
     )
 )
 
+start = step_timer("Show data sample")
+
 df.show(truncate=False)
+logger.info(f"Total rows in df: {df.count()}")
+
+finish_step("Show data sample", start)
