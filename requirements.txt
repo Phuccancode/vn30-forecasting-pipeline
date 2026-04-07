@@ -15,4 +15,10 @@ SQLAlchemy
 streamlit
 plotly
 
+#env
 dotenv
+
+# Data Mining
+scikit-learn
+torch
+>>>>>>> main
