@@ -1,6 +1,6 @@
-# 📈 VN30 Algorithmic Data Warehouse & Analytics Pipeline
+# 📈 HOSE Stock Data Warehouse & Analytics Pipeline
 
-An End-to-End Data Engineering project that automates the extraction, transformation, and visualization of historical stock market data for the top 30 largest companies in Vietnam (VN30). 
+An end-to-end Data Engineering project that automates extraction, transformation, and visualization of Vietnam stock market data for **HOSE-listed stocks**.
 
 This project demonstrates a production-ready, highly scalable **Medallion Architecture** built entirely on modern Data Engineering principles and containerization.
 
@@ -11,8 +11,9 @@ This project demonstrates a production-ready, highly scalable **Medallion Archit
 The pipeline implements the **Medallion Architecture (Bronze ➔ Silver ➔ Gold)** to incrementally improve data structure and quality as it flows through the system.
 
 1. **Ingestion (Bronze Layer)**: 
-   - Daily extraction of historical stock data using the `vnstock` Python API.
-   - Raw data is stored immutably in **Azure Blob Storage** (Data Lake) as Parquet files partitioned by date.
+   - Data extraction from `vnstock` for **HOSE stock symbols**.
+   - Market data is fetched at **1-hour interval (`interval="1H"`)**.
+   - Raw data is stored in **Azure Blob Storage** (Data Lake) as Parquet files partitioned by `trade_date` and `ticker`.
 2. **Transformation (Silver Layer)**: 
    - **PySpark** jobs read the raw data, perform data quality checks, clean missing values, normalize schemas, and calculate moving averages.
    - Cleaned data is saved back to Azure Blob Storage in the `processed` container.
@@ -25,8 +26,8 @@ The pipeline implements the **Medallion Architecture (Bronze ➔ Silver ➔ Gold
 
 ```mermaid
 flowchart LR
-A["vnstock API"] --> B["Bronze Ingestion Script"]
-B --> C["Azure Blob: raw Parquet\npartition by date"]
+A["vnstock API (HOSE, 1H)"] --> B["Bronze Ingestion Script"]
+B --> C["Azure Blob: raw Parquet\npartition by trade_date/ticker"]
 
 C --> D["Silver PySpark Transform"]
 D --> E["Azure Blob: processed Parquet"]
@@ -75,7 +76,7 @@ project/
 ├── sql/                      # DDL scripts for Azure SQL Star Schema
 ├── infrastructure/           # Bash scripts for automated Azure provisioning
 ├── streamlit_app/            # Frontend dashboard for data visualization
-├── config/                   # Configuration files (e.g., VN30 ticker list)
+├── config/                   # Configuration files
 ├── docker-compose.yml        # Airflow cluster configuration
 ├── Makefile                  # Developer fast-commands
 └── requirements.txt          # Python dependencies
@@ -86,7 +87,7 @@ project/
 ## 🌟 Key Engineering Highlights (For Recruiters)
 
 1. **Idempotency & Fault Tolerance:** Airflow DAGs are designed to be idempotent. Backfilling historical data or rerunning failed tasks will not result in duplicated records.
-2. **Scalable Data Lake Design:** Utilizing Parquet format over CSV provides heavy compression and schema evolution capabilities. Partitioning by `YYYY/MM/DD` ensures fast query performance.
+2. **Scalable Data Lake Design:** Utilizing Parquet format over CSV provides heavy compression and schema evolution capabilities. Partitioning by `trade_date` and `ticker` improves selective reads in downstream Spark jobs.
 3. **Cost Optimization:** Using Azure SQL *Serverless* compute pauses the database when inactive, significantly reducing cloud operational costs for a portfolio project.
 4. **Environment Isolation:** 100% Dockerized orchestration. Zero local dependencies required other than Docker and WSL2.
 5. **Security Best Practices:** Absolute separation of secrets using `.env` files and Streamlit Secrets management. No hardcoded credentials in the repository.
