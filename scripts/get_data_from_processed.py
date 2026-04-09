@@ -52,10 +52,7 @@ BASE_PATH_PROCESSED = f"abfss://processed@{storage_account}.dfs.core.windows.net
 
 spark = get_spark_session()
 df = (
-    spark.read
-    .option("recursiveFileLookup", "true")
-    .option("pathGlobFilter", "*.parquet")
-    .parquet(
+    spark.read.parquet(
         f"{BASE_PATH_PROCESSED}/silver"
     )
 )
