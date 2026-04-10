@@ -86,10 +86,10 @@ def get_data_quality_metrics(df_ffill):
     metrics = {
         "total_rows": df_ffill.count(),
         "ticker_null_count": df_ffill.filter(
-            col("ticker").isNull() | col("ticker").isNaN()
+            col("ticker").isNull()
         ).count(),
         "event_time_null_count": df_ffill.filter(
-            col("event_time").isNull() | col("event_time").isNaN()
+            col("event_time").isNull()
         ).count(),
         "ohlc_null_count": df_ffill.filter(
             col("open").isNull()
@@ -224,7 +224,6 @@ def main() -> None:
 
     metrics = get_data_quality_metrics(df_ffill)
     logger.info("Data quality metrics: %s", metrics)
-    check_critical_rule(metrics)
 
     run_ts_utc = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     run_date = datetime.utcnow().strftime("%Y-%m-%d")
@@ -238,6 +237,8 @@ def main() -> None:
     )
     finish_step("Write silver quality report", t)
     logger.info("Silver quality report path: %s", silver_quality_output_path)
+
+    check_critical_rule(metrics)
 
     t = step_timer("Write silver parquet")
     (
