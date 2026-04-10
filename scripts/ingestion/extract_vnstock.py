@@ -42,6 +42,7 @@ def fetch_data_with_retry(ticker: str, start_date: str, end_date: str, max_retri
                 Quote(symbol=ticker, source="KBS")
                 .history(start=start_date, end=end_date, interval="1H")
             )
+            time.sleep(3)  # Short sleep to avoid hitting API rate limits
 
             if df is not None and not df.empty:
                 logger.info(f"Successfully fetched {len(df)} records for {ticker}")
