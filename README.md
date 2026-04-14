@@ -1,6 +1,6 @@
 # 📈 HOSE Stock Data Warehouse & Analytics Pipeline
 
-An end-to-end Data Engineering project that automates extraction, transformation, and visualization of Vietnam stock market data for **HOSE-listed stocks**.
+An end-to-end Data Engineering project that automates extraction, transformation, and analytics of Vietnam stock market data for **HOSE-listed stocks**.
 
 This project demonstrates a production-ready, highly scalable **Medallion Architecture** built entirely on modern Data Engineering principles and containerization.
 
@@ -21,8 +21,9 @@ The pipeline implements the **Medallion Architecture (Bronze ➔ Silver ➔ Gold
    - PySpark loads the processed data, models it into a **Star Schema** (Fact & Dimension tables), and pushes it to an **Azure SQL Database** optimized for analytical queries.
 4. **Orchestration**:
    - The entire workflow is scheduled, monitored, and orchestrated locally using **Apache Airflow** running on Docker.
-5. **Visualization**:
-   - A **Streamlit** dashboard deployed on Streamlit Community Cloud queries the Gold layer to provide real-time interactive financial analytics.
+5. **Visualization & Reporting**:
+   - A **Streamlit** dashboard for interactive analytics.
+   - A **Power BI** dashboard connected to Azure SQL for scheduled reporting and KPI monitoring.
 
 ```mermaid
 flowchart LR
@@ -48,6 +49,8 @@ K["Postgres in Docker"] -. "Airflow metadata" .- J
 
 G --> L["Streamlit Dashboard"]
 I --> L
+G --> M["Power BI Dashboard"]
+I --> M
 ```
 
 ---
@@ -56,6 +59,7 @@ I --> L
 
 - **Orchestration:** Apache Airflow 2.8 (LocalExecutor)
 - **Data Processing:** Apache Spark (PySpark), Pandas
+- **ML Modeling:** Time Series Transformer (Deep Learning, regression for next-day close)
 - **Cloud Infrastructure:** Microsoft Azure (Blob Storage Gen2, Azure SQL Database Serverless)
 - **Containerization & CI/CD:** Docker, Docker Compose, GNU Make
 - **Data Visualization:** Streamlit, Plotly
@@ -128,3 +132,45 @@ Navigate to the Streamlit app directory:
 cd streamlit_app
 streamlit run app.py
 ```
+
+---
+
+## 🤖 ML Strategy (Day 9+)
+
+- **Task type:** Regression (`target_next_close`) for predicting next trading day close price.
+- **Model:** Time Series Transformer (deep learning) with daily retraining.
+- **Data source:** `dbo.vw_ml_features` from Gold layer.
+- **Split strategy:** Time-based split (80/20), no random shuffle.
+- **Primary metric:** `MSE`.
+- **Secondary metrics:** `RMSE`, `MAE`, and `Directional Accuracy` (target > 70%).
+- **Baseline:** Naive predictor `y_pred = close_t`.
+- **Artifacts:** Saved locally under `models/`.
+- **Serving outputs:** 
+  - `fact_price_predictions` for daily predictions.
+  - `ml_metrics_history` for model KPI tracking over time.
+
+---
+
+## ☁️ Deploy on Azure VM (Recommended)
+
+- **VM:** Azure VM `Ubuntu 22.04 LTS` (suggested size: `Standard B2s` for demo).
+- **Runtime:** Docker + Docker Compose (same stack as local).
+- **Expose publicly:** Streamlit only (via Nginx on 80/443).
+- **Keep private:** Airflow UI (access via SSH tunnel/VPN, avoid public 8080).
+- **Security baseline:**
+  - NSG allow `22` (restricted source IP), `80`, `443`.
+  - Do not expose internal service ports directly (`8080`, `8501`, database ports).
+- **Secrets:** Keep `.env` on VM with strict permissions (`chmod 600`) and set a stable `FERNET_KEY`.
+
+---
+
+## 📊 Power BI Integration
+
+- **Data source:** Connect Power BI to **Azure SQL** (Gold + ML outputs), not to Streamlit.
+- **Recommended BI objects:**
+  - `fact_prices`, `dim_ticker`, `dim_date`
+  - `fact_price_predictions`
+  - `ml_metrics_history`
+- **Suggested semantic view:** `vw_bi_actual_vs_pred` for easy model-vs-actual reporting.
+- **Refresh strategy:** Scheduled refresh in Power BI Service after daily DAG completion.
+- **Security recommendation:** Use a dedicated read-only SQL login for Power BI (SELECT-only on BI schema/views).

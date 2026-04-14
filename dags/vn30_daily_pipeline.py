@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pendulum
 from airflow import DAG
-from airflow.operators.bash import BashOperator
+from airflow.providers.standard.operators.bash import BashOperator
 
 
 default_args = {
@@ -35,16 +35,15 @@ with DAG(
 
     silver_transform = BashOperator(
         task_id="silver_transform",
-        bash_command="python /opt/airflow/scripts/transform/silver_transform.py",
+        bash_command=(
+            "python /opt/airflow/scripts/transform/silver_transform.py "
+            "--mode incremental --target-date {{ ds }}"
+        ),
     )
 
     gold_load = BashOperator(
         task_id="gold_load",
-        bash_command=(
-            'if [ -f /opt/airflow/scripts/load/gold_load.py ]; then '
-            'python /opt/airflow/scripts/load/gold_load.py; '
-            'else echo "Day 8 pending: scripts/load/gold_load.py not found. Placeholder success."; fi'
-        ),
+        bash_command="python /opt/airflow/scripts/load/gold_load.py",
     )
 
     ml_inference = BashOperator(

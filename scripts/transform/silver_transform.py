@@ -1,11 +1,13 @@
-import os
+import argparse
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from time import perf_counter
-from pyspark.sql import SparkSession, Window
-from pyspark.sql.functions import col
-from pyspark.sql import functions as F
+
 from dotenv import load_dotenv
+from pyspark.sql import SparkSession, Window
+from pyspark.sql import functions as F
+from pyspark.sql.functions import col
 
 load_dotenv()
 
@@ -18,7 +20,29 @@ logging.basicConfig(
 logger = logging.getLogger("silver_transform")
 
 
-def step_timer(label: str):
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Silver transform for VN30 medallion pipeline")
+    parser.add_argument(
+        "--mode",
+        choices=["incremental", "full"],
+        default="incremental",
+        help="Run mode. incremental writes only target-date partitions; full rebuilds all partitions.",
+    )
+    parser.add_argument(
+        "--target-date",
+        default=datetime.today().strftime("%Y-%m-%d"),
+        help="Target date (YYYY-MM-DD). Used for incremental partition output.",
+    )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=45,
+        help="Lookback window in days used in incremental mode to compute MA/ffill context.",
+    )
+    return parser.parse_args()
+
+
+def step_timer(label: str) -> float:
     start = perf_counter()
     logger.info("START: %s", label)
     return start
@@ -27,6 +51,40 @@ def step_timer(label: str):
 def finish_step(label: str, start_time: float) -> None:
     elapsed = perf_counter() - start_time
     logger.info("DONE: %s (%.2fs)", label, elapsed)
+
+
+def daterange(start_date, end_date):
+    cursor = start_date
+    while cursor <= end_date:
+        yield cursor
+        cursor += timedelta(days=1)
+
+
+def path_exists(spark: SparkSession, path: str) -> bool:
+    jvm = spark._jvm
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    jpath = jvm.org.apache.hadoop.fs.Path(path)
+    fs = jpath.getFileSystem(hadoop_conf)
+    return fs.exists(jpath)
+
+
+def build_raw_input_paths(
+    spark: SparkSession,
+    base_path_raw: str,
+    mode: str,
+    target_date,
+    lookback_days: int,
+) -> list[str]:
+    if mode == "full":
+        return [f"{base_path_raw}/"]
+
+    lower_bound = target_date - timedelta(days=lookback_days)
+    paths = []
+    for d in daterange(lower_bound, target_date):
+        p = f"{base_path_raw}/trade_date={d}"
+        if path_exists(spark, p):
+            paths.append(p)
+    return paths
 
 
 def get_spark_session() -> SparkSession:
@@ -41,10 +99,22 @@ def get_spark_session() -> SparkSession:
         .getOrCreate()
     )
     spark.conf.set(
-        f"fs.azure.account.auth.type.{storage_account}.dfs.core.windows.net", "SharedKey"
+        f"fs.azure.account.auth.type.{storage_account}.dfs.core.windows.net",
+        "SharedKey",
     )
     spark.conf.set(
-        f"fs.azure.account.key.{storage_account}.dfs.core.windows.net", account_key
+        f"fs.azure.account.key.{storage_account}.dfs.core.windows.net",
+        account_key,
+    )
+    # Ensure Hadoop FileSystem API (used by path existence checks) sees the same credentials.
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    hadoop_conf.set(
+        f"fs.azure.account.auth.type.{storage_account}.dfs.core.windows.net",
+        "SharedKey",
+    )
+    hadoop_conf.set(
+        f"fs.azure.account.key.{storage_account}.dfs.core.windows.net",
+        account_key,
     )
     spark.conf.set("spark.sql.session.timeZone", "Asia/Ho_Chi_Minh")
     spark.sparkContext.setLogLevel(os.getenv("SPARK_LOG_LEVEL", "WARN"))
@@ -52,7 +122,7 @@ def get_spark_session() -> SparkSession:
     return spark
 
 
-def check_critical_rule(metrics: dict) -> None:
+def check_critical_rule(metrics: dict, mode: str) -> None:
     if metrics["invalid_price_count"] > 0:
         raise ValueError(
             f"Data quality check failed: {metrics['invalid_price_count']} rows with negative price values"
@@ -79,52 +149,68 @@ def check_critical_rule(metrics: dict) -> None:
         raise ValueError(
             f"Data quality check failed: Found {metrics['ohlc_null_count']} rows with null OHLC values after ffill"
         )
-    if metrics["total_rows"] == 0:
+    if metrics["total_rows"] == 0 and mode == "full":
         raise ValueError("Data quality check failed: No rows left after transformations")
 
+
 def get_data_quality_metrics(df_ffill):
-    metrics = {
-        "total_rows": df_ffill.count(),
-        "ticker_null_count": df_ffill.filter(
-            col("ticker").isNull()
-        ).count(),
-        "event_time_null_count": df_ffill.filter(
-            col("event_time").isNull()
-        ).count(),
-        "ohlc_null_count": df_ffill.filter(
-            col("open").isNull()
-            | col("open").isNaN()
-            | col("high").isNull()
-            | col("high").isNaN()
-            | col("low").isNull()
-            | col("low").isNaN()
-            | col("close").isNull()
-            | col("close").isNaN()
-        ).count(),
-        "duplicate_key_count": df_ffill.groupBy("ticker", "event_time")
-        .count()
-        .filter("count > 1")
-        .count(),
-        "invalid_price_count": df_ffill.filter(
-            (col("open") < 0)
-            | (col("high") < 0)
-            | (col("low") < 0)
-            | (col("close") < 0)
-        ).count(),
-        "invalid_ohlc_count": df_ffill.filter(
-            (col("high") < col("low"))
-            | (col("high") < col("open"))
-            | (col("high") < col("close"))
-            | (col("low") > col("open"))
-            | (col("low") > col("close"))
-        ).count(),
-        "invalid_volume_count": df_ffill.filter(col("volume") < 0).count(),
-    }
-    
-    return metrics
+    agg_row = (
+        df_ffill.agg(
+            F.count("*").alias("total_rows"),
+            F.sum(F.when(col("ticker").isNull(), 1).otherwise(0)).alias("ticker_null_count"),
+            F.sum(F.when(col("event_time").isNull(), 1).otherwise(0)).alias("event_time_null_count"),
+            F.sum(
+                F.when(
+                    col("open").isNull()
+                    | F.isnan(col("open"))
+                    | col("high").isNull()
+                    | F.isnan(col("high"))
+                    | col("low").isNull()
+                    | F.isnan(col("low"))
+                    | col("close").isNull()
+                    | F.isnan(col("close")),
+                    1,
+                ).otherwise(0)
+            ).alias("ohlc_null_count"),
+            F.sum(
+                F.when(
+                    (col("open") < 0)
+                    | (col("high") < 0)
+                    | (col("low") < 0)
+                    | (col("close") < 0),
+                    1,
+                ).otherwise(0)
+            ).alias("invalid_price_count"),
+            F.sum(
+                F.when(
+                    (col("high") < col("low"))
+                    | (col("high") < col("open"))
+                    | (col("high") < col("close"))
+                    | (col("low") > col("open"))
+                    | (col("low") > col("close")),
+                    1,
+                ).otherwise(0)
+            ).alias("invalid_ohlc_count"),
+            F.sum(F.when(col("volume") < 0, 1).otherwise(0)).alias("invalid_volume_count"),
+        )
+        .collect()[0]
+        .asDict()
+    )
+    duplicate_key_count = (
+        df_ffill.groupBy("ticker", "event_time").count().filter("count > 1").count()
+    )
+    agg_row["duplicate_key_count"] = duplicate_key_count
+    return agg_row
+
 
 def main() -> None:
-    logger.info("Load environment and initialize pipeline")
+    args = parse_args()
+    logger.info(
+        "Load environment and initialize pipeline | mode=%s | target_date=%s | lookback_days=%s",
+        args.mode,
+        args.target_date,
+        args.lookback_days,
+    )
     spark = get_spark_session()
 
     storage_account = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
@@ -137,11 +223,28 @@ def main() -> None:
     logger.info("Read path: %s/", base_path_raw)
     logger.info("Write path: %s", silver_output_path)
 
+    target_date = datetime.strptime(args.target_date, "%Y-%m-%d").date()
+
+    t = step_timer("Resolve raw input paths")
+    raw_input_paths = build_raw_input_paths(
+        spark=spark,
+        base_path_raw=base_path_raw,
+        mode=args.mode,
+        target_date=target_date,
+        lookback_days=args.lookback_days,
+    )
+    finish_step("Resolve raw input paths", t)
+    logger.info("Raw input path count: %s", len(raw_input_paths))
+
+    if not raw_input_paths:
+        logger.warning("No raw partitions found for selected mode/date window. Skip silver run.")
+        return
+
     t = step_timer("Build raw read + select transform")
     df = (
         spark.read.option("recursiveFileLookup", "true")
         .option("pathGlobFilter", "*.parquet")
-        .parquet(f"{base_path_raw}/")
+        .parquet(*raw_input_paths)
         .withColumn(
             "event_time",
             F.expr(
@@ -166,6 +269,20 @@ def main() -> None:
     if missing_cols:
         raise ValueError(f"Missing required columns in raw input: {missing_cols}")
     finish_step("Validate required columns", t)
+
+    t = step_timer("Apply mode-specific input filter")
+    if args.mode == "incremental":
+        lower_bound = target_date - timedelta(days=args.lookback_days)
+        df = df.filter(
+            (col("event_time") >= F.to_timestamp(F.lit(str(lower_bound))))
+            & (col("event_time") < F.to_timestamp(F.lit(str(target_date + timedelta(days=1)))))
+        )
+        logger.info(
+            "Incremental raw filter applied: [%s, %s)",
+            lower_bound,
+            target_date + timedelta(days=1),
+        )
+    finish_step("Apply mode-specific input filter", t)
 
     t = step_timer("Clean nulls and normalize volume")
     df = (
@@ -222,13 +339,30 @@ def main() -> None:
     df_ffill = df_ffill.dropna(subset=["open", "high", "low", "close"])
     finish_step("Drop rows with null OHLC after ffill", t)
 
-    metrics = get_data_quality_metrics(df_ffill)
+    df_ffill = df_ffill.withColumn("trade_date", F.to_date("event_time"))
+
+    if args.mode == "incremental":
+        t = step_timer("Restrict output rows to target-date partitions")
+        df_output = df_ffill.filter(col("trade_date") == F.to_date(F.lit(str(target_date))))
+        finish_step("Restrict output rows to target-date partitions", t)
+    else:
+        df_output = df_ffill
+
+    metrics = get_data_quality_metrics(df_output)
     logger.info("Data quality metrics: %s", metrics)
 
     run_ts_utc = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     run_date = datetime.utcnow().strftime("%Y-%m-%d")
     t = step_timer("Write silver quality report")
-    quality_metrics = [{**metrics, "run_ts_utc": run_ts_utc, "run_date": run_date}]
+    quality_metrics = [
+        {
+            **metrics,
+            "run_ts_utc": run_ts_utc,
+            "run_date": run_date,
+            "mode": args.mode,
+            "target_date": str(target_date),
+        }
+    ]
     (
         spark.createDataFrame(quality_metrics)
         .write.mode("append")
@@ -238,29 +372,30 @@ def main() -> None:
     finish_step("Write silver quality report", t)
     logger.info("Silver quality report path: %s", silver_quality_output_path)
 
-    check_critical_rule(metrics)
+    if metrics["total_rows"] == 0 and args.mode == "incremental":
+        logger.warning(
+            "No rows found for target_date=%s in incremental mode. Skip silver write.",
+            target_date,
+        )
+        return
+
+    check_critical_rule(metrics, args.mode)
 
     t = step_timer("Write silver parquet")
+    spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
     (
-        df_ffill.repartition(16, "ticker")
+        df_output.repartition(4, "trade_date", "ticker")
         .write.mode("overwrite")
-        .partitionBy("ticker")
+        .partitionBy("trade_date", "ticker")
         .parquet(silver_output_path)
     )
     finish_step("Write silver parquet", t)
-
-    t = step_timer("Show sample rows")
-    df_ffill.show(truncate=False)
-    finish_step("Show sample rows", t)
-
-    t = step_timer("Print schema")
-    df_ffill.printSchema()
-    finish_step("Print schema", t)
 
     t = step_timer("Count rows")
     print(f"Total rows: {metrics['total_rows']}")
     finish_step("Count rows", t)
     logger.info("Pipeline completed successfully")
+
 
 if __name__ == "__main__":
     main()

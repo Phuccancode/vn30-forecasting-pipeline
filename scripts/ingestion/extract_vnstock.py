@@ -33,7 +33,13 @@ def load_tickers() -> list[str]:
 
     return tickers
 
-def fetch_data_with_retry(ticker: str, start_date: str, end_date: str, max_retries: int = 3) -> pd.DataFrame:
+def fetch_data_with_retry(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    max_retries: int = 3,
+    sleep_on_quota: float = 30.0,
+) -> pd.DataFrame:
     """Fetch historical data using vnstock with retry logic"""
     for attempt in range(max_retries):
         try:
@@ -51,6 +57,28 @@ def fetch_data_with_retry(ticker: str, start_date: str, end_date: str, max_retri
                 logger.warning(f"No data returned for {ticker}")
                 return pd.DataFrame()
                 
+        except SystemExit as e:
+            # vnstock/vnai may terminate the process on rate-limit by raising SystemExit.
+            # Convert this into controlled retry behavior instead of crashing the whole task.
+            message = str(e)
+            is_rate_limited = (
+                "Rate limit exceeded" in message
+                or "GIỚI HẠN API ĐÃ ĐẠT TỐI ĐA" in message
+                or "Process terminated" in message
+            )
+            if is_rate_limited and attempt < max_retries - 1:
+                logger.warning(
+                    "Rate limit hit while fetching %s. Waiting %.1fs before retry (%s/%s)...",
+                    ticker,
+                    sleep_on_quota,
+                    attempt + 1,
+                    max_retries,
+                )
+                time.sleep(sleep_on_quota)
+                continue
+
+            logger.error(f"SystemExit while fetching data for {ticker}: {message}")
+            return pd.DataFrame()
         except Exception as e:
             logger.error(f"Error fetching data for {ticker}: {e}")
             if attempt < max_retries - 1:
@@ -113,6 +141,8 @@ def main():
                         help="Sleep seconds after each ticker fetch for rate-limit protection.")
     parser.add_argument("--sleep-between-batches", type=float, default=2.0,
                         help="Sleep seconds after each batch upload.")
+    parser.add_argument("--sleep-on-quota", type=float, default=30.0,
+                        help="Sleep seconds before retry when API quota/rate-limit is hit.")
 
     args = parser.parse_args()
 
@@ -139,7 +169,12 @@ def main():
 
         batch_written = 0
         for ticker in ticker_batch:
-            df = fetch_data_with_retry(ticker, start_date, target_date)
+            df = fetch_data_with_retry(
+                ticker=ticker,
+                start_date=start_date,
+                end_date=target_date,
+                sleep_on_quota=args.sleep_on_quota,
+            )
             logger.info(f"Fetched {len(df)} records for {ticker}")
 
             if not df.empty:
