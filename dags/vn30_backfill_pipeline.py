@@ -10,8 +10,10 @@ from airflow.providers.standard.operators.bash import BashOperator
 default_args = {
     "owner": "phoenix",
     "depends_on_past": False,
-    "retries": 1,
+    "retries": 3,
     "retry_delay": timedelta(minutes=5),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=20),
 }
 
 

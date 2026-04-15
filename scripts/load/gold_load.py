@@ -6,7 +6,7 @@ import os
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, sleep
 from urllib.parse import quote_plus
 
 import pandas as pd
@@ -15,6 +15,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 
 
 load_dotenv()
@@ -324,12 +325,45 @@ def build_gold_dataframes(silver_df: DataFrame) -> tuple[pd.DataFrame, pd.DataFr
 
 
 def create_engine_from_odbc(odbc_connection_string: str) -> Engine:
+    if "Connection Timeout=" not in odbc_connection_string:
+        odbc_connection_string = f"{odbc_connection_string.rstrip(';')};Connection Timeout=60;"
+
     sqlalchemy_url = f"mssql+pyodbc:///?odbc_connect={quote_plus(odbc_connection_string)}"
     return create_engine(
         sqlalchemy_url,
         fast_executemany=True,
         pool_pre_ping=True,
+        pool_recycle=1800,
+        pool_timeout=120,
     )
+
+
+def run_with_sql_retry(step_name: str, operation, max_attempts: int = 3) -> None:
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            operation()
+            return
+        except OperationalError as err:
+            last_err = err
+            is_last_attempt = attempt == max_attempts
+            err_text = str(err)
+            is_transient_timeout = "HYT00" in err_text or "Login timeout expired" in err_text
+            if not is_transient_timeout or is_last_attempt:
+                raise
+
+            delay_seconds = 5 * attempt
+            logger.warning(
+                "%s failed with transient SQL timeout (attempt %s/%s). Retrying in %ss",
+                step_name,
+                attempt,
+                max_attempts,
+                delay_seconds,
+            )
+            sleep(delay_seconds)
+
+    if last_err:
+        raise last_err
 
 
 def find_ddl_file() -> Path | None:
@@ -359,7 +393,7 @@ def apply_gold_ddl(engine: Engine) -> None:
     else:
         logger.warning("DDL file not found; using embedded DDL fallback")
         sql_text = EMBEDDED_GOLD_DDL
-    run_sql_batches(engine, sql_text)
+    run_with_sql_retry("Apply Gold DDL", lambda: run_sql_batches(engine, sql_text))
 
 
 def load_staging_tables(
@@ -368,9 +402,15 @@ def load_staging_tables(
     dim_date: pd.DataFrame,
     fact: pd.DataFrame,
 ) -> None:
-    dim_ticker.to_sql("stg_dim_ticker", engine, schema="dbo", if_exists="replace", index=False)
-    dim_date.to_sql("stg_dim_date", engine, schema="dbo", if_exists="replace", index=False)
-    fact.to_sql("stg_fact_prices", engine, schema="dbo", if_exists="replace", index=False)
+    def _run() -> None:
+        dim_ticker.to_sql("stg_dim_ticker", engine, schema="dbo", if_exists="replace", index=False)
+        dim_date.to_sql("stg_dim_date", engine, schema="dbo", if_exists="replace", index=False)
+        fact.to_sql("stg_fact_prices", engine, schema="dbo", if_exists="replace", index=False)
+
+    run_with_sql_retry(
+        "Load staging tables",
+        _run,
+    )
 
 
 def merge_to_gold(engine: Engine) -> None:
@@ -533,9 +573,15 @@ def merge_to_gold(engine: Engine) -> None:
         ) AS target_next_close
     FROM base;
     """
-    with engine.begin() as conn:
-        conn.execute(text(merge_sql))
-        conn.execute(text(view_sql))
+    def _run() -> None:
+        with engine.begin() as conn:
+            conn.execute(text(merge_sql))
+            conn.execute(text(view_sql))
+
+    run_with_sql_retry(
+        "Merge to Gold",
+        _run,
+    )
 
 
 def log_validation(engine: Engine) -> None:
@@ -546,8 +592,14 @@ def log_validation(engine: Engine) -> None:
         (SELECT COUNT(*) FROM dbo.fact_prices) AS fact_prices_count,
         (SELECT COUNT(*) FROM dbo.vw_ml_features) AS ml_feature_rows;
     """
-    with engine.begin() as conn:
-        row = conn.execute(text(validation_sql)).mappings().first()
+    holder: dict[str, object] = {}
+
+    def _run() -> None:
+        with engine.begin() as conn:
+            holder["row"] = conn.execute(text(validation_sql)).mappings().first()
+
+    run_with_sql_retry("Validate Gold outputs", _run)
+    row = holder.get("row")
     logger.info("Gold validation snapshot: %s", dict(row) if row else {})
 
 
