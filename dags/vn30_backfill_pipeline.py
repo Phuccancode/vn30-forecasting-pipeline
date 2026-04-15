@@ -49,7 +49,12 @@ with DAG(
 
     gold_load = BashOperator(
         task_id="gold_load",
-        bash_command="python /opt/airflow/scripts/load/gold_load.py",
+        bash_command=(
+            "python /opt/airflow/scripts/load/gold_load.py "
+            "--start-date {{ dag_run.conf.get('start_date', '2025-01-01') if dag_run else '2025-01-01' }} "
+            "--end-date {{ dag_run.conf.get('end_date', ds) if dag_run else ds }} "
+            "--batch-days {{ dag_run.conf.get('gold_batch_days', 31) if dag_run else 31 }}"
+        ),
     )
 
     bronze_backfill >> silver_full >> gold_load

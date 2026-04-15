@@ -99,7 +99,8 @@ def upload_directory_to_blob(
 
         uploaded = 0
         failed = 0
-        with ThreadPoolExecutor(max_workers=None) as executor:
+        worker_count = max(1, int(max_workers))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {executor.submit(_upload_file, file_path): file_path for file_path in files}
             for future in as_completed(futures):
                 file_path = futures[future]
@@ -112,10 +113,11 @@ def upload_directory_to_blob(
                     logger.error(f"Failed to upload '{file_path}': {exc}")
 
         logger.info(
-            "Directory upload completed. uploaded=%s failed=%s total=%s",
+            "Directory upload completed. uploaded=%s failed=%s total=%s workers=%s",
             uploaded,
             failed,
             len(files),
+            worker_count,
         )
         return failed == 0
     except Exception as e:

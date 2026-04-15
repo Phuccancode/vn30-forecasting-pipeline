@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
 from urllib.parse import quote_plus
@@ -165,6 +167,27 @@ def get_required_env(name: str) -> str:
     return value
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Load Gold model to Azure SQL")
+    parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional lower bound date (YYYY-MM-DD) for Gold load window.",
+    )
+    parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Optional upper bound date (YYYY-MM-DD) for Gold load window.",
+    )
+    parser.add_argument(
+        "--batch-days",
+        type=int,
+        default=31,
+        help="Number of days per Gold batch to limit memory usage.",
+    )
+    return parser.parse_args()
+
+
 def get_spark_session(storage_account: str, account_key: str) -> SparkSession:
     spark = (
         SparkSession.builder.master("local[*]")
@@ -201,6 +224,39 @@ def read_silver_dataframe(spark: SparkSession, storage_account: str) -> DataFram
         df = df.withColumn("ticker", ticker_from_path)
 
     return df
+
+
+def parse_optional_date(value: str | None, field_name: str) -> date | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"Invalid {field_name}: {value}. Expected YYYY-MM-DD") from exc
+
+
+def resolve_load_window(
+    silver_df: DataFrame,
+    start_date_arg: date | None,
+    end_date_arg: date | None,
+) -> tuple[date, date]:
+    stats = (
+        silver_df.select(
+            F.min(F.to_date("event_time")).alias("min_date"),
+            F.max(F.to_date("event_time")).alias("max_date"),
+        )
+        .collect()[0]
+    )
+    data_min = stats["min_date"]
+    data_max = stats["max_date"]
+    if data_min is None or data_max is None:
+        raise RuntimeError("Silver dataset has no valid event_time values for Gold window")
+
+    start_date = start_date_arg or data_min
+    end_date = end_date_arg or data_max
+    if start_date > end_date:
+        raise ValueError("--start-date must be <= --end-date")
+    return start_date, end_date
 
 
 def build_gold_dataframes(silver_df: DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -496,9 +552,14 @@ def log_validation(engine: Engine) -> None:
 
 
 def main() -> None:
+    args = parse_args()
     storage_account = get_required_env("AZURE_STORAGE_ACCOUNT_NAME")
     storage_key = get_required_env("AZURE_STORAGE_ACCOUNT_KEY")
     sql_conn_str = get_required_env("AZURE_SQL_CONNECTION_STRING")
+    start_date_arg = parse_optional_date(args.start_date, "--start-date")
+    end_date_arg = parse_optional_date(args.end_date, "--end-date")
+    if args.batch_days <= 0:
+        raise ValueError("--batch-days must be > 0")
 
     t = step_timer("Create Spark session")
     spark = get_spark_session(storage_account, storage_key)
@@ -507,22 +568,7 @@ def main() -> None:
     try:
         t = step_timer("Read Silver dataset")
         silver_df = read_silver_dataframe(spark, storage_account)
-        silver_count = silver_df.count()
         finish_step("Read Silver dataset", t)
-        logger.info("Silver rows: %s", silver_count)
-
-        if silver_count == 0:
-            raise RuntimeError("Silver dataset is empty; abort Gold load")
-
-        t = step_timer("Build Gold source dataframes")
-        dim_ticker, dim_date, fact = build_gold_dataframes(silver_df)
-        finish_step("Build Gold source dataframes", t)
-        logger.info(
-            "Prepared rows - dim_ticker: %s | dim_date: %s | fact: %s",
-            len(dim_ticker),
-            len(dim_date),
-            len(fact),
-        )
 
         t = step_timer("Open SQL engine")
         engine = create_engine_from_odbc(sql_conn_str)
@@ -532,13 +578,70 @@ def main() -> None:
         apply_gold_ddl(engine)
         finish_step("Apply Gold DDL", t)
 
-        t = step_timer("Load staging tables")
-        load_staging_tables(engine, dim_ticker, dim_date, fact)
-        finish_step("Load staging tables", t)
+        window_start, window_end = resolve_load_window(
+            silver_df=silver_df,
+            start_date_arg=start_date_arg,
+            end_date_arg=end_date_arg,
+        )
+        logger.info(
+            "Gold load window resolved: %s -> %s | batch_days=%s",
+            window_start,
+            window_end,
+            args.batch_days,
+        )
 
-        t = step_timer("Merge staging to Gold schema")
-        merge_to_gold(engine)
-        finish_step("Merge staging to Gold schema", t)
+        total_batches = 0
+        loaded_batches = 0
+        cursor = window_start
+        while cursor <= window_end:
+            total_batches += 1
+            batch_start = cursor
+            batch_end = min(window_end, batch_start + timedelta(days=args.batch_days - 1))
+            logger.info("START: Gold batch %s | [%s, %s]", total_batches, batch_start, batch_end)
+
+            batch_df = silver_df.filter(
+                (F.to_date("event_time") >= F.to_date(F.lit(str(batch_start))))
+                & (F.to_date("event_time") <= F.to_date(F.lit(str(batch_end))))
+            )
+            has_rows = batch_df.limit(1).count() > 0
+            if not has_rows:
+                logger.info("SKIP: Gold batch %s has no rows", total_batches)
+                cursor = batch_end + timedelta(days=1)
+                continue
+
+            t = step_timer(f"Build Gold source dataframes for batch {total_batches}")
+            dim_ticker, dim_date, fact = build_gold_dataframes(batch_df)
+            finish_step(f"Build Gold source dataframes for batch {total_batches}", t)
+            logger.info(
+                "Batch %s prepared rows - dim_ticker: %s | dim_date: %s | fact: %s",
+                total_batches,
+                len(dim_ticker),
+                len(dim_date),
+                len(fact),
+            )
+            if fact.empty:
+                logger.info("SKIP: Gold batch %s has empty fact dataframe", total_batches)
+                cursor = batch_end + timedelta(days=1)
+                continue
+
+            t = step_timer(f"Load staging tables for batch {total_batches}")
+            load_staging_tables(engine, dim_ticker, dim_date, fact)
+            finish_step(f"Load staging tables for batch {total_batches}", t)
+
+            t = step_timer(f"Merge staging to Gold schema for batch {total_batches}")
+            merge_to_gold(engine)
+            finish_step(f"Merge staging to Gold schema for batch {total_batches}", t)
+            loaded_batches += 1
+
+            cursor = batch_end + timedelta(days=1)
+
+        logger.info(
+            "Gold batch summary: loaded_batches=%s total_batches=%s",
+            loaded_batches,
+            total_batches,
+        )
+        if loaded_batches == 0:
+            raise RuntimeError("No Gold batches were loaded; check selected date window and Silver data")
 
         t = step_timer("Validate Gold outputs")
         log_validation(engine)
