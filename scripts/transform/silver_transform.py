@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
         default=45,
         help="Lookback window in days used in incremental mode to compute MA/ffill context.",
     )
+    parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional lower bound date (YYYY-MM-DD). Rows older than this date are excluded.",
+    )
     return parser.parse_args()
 
 
@@ -206,10 +211,11 @@ def get_data_quality_metrics(df_ffill):
 def main() -> None:
     args = parse_args()
     logger.info(
-        "Load environment and initialize pipeline | mode=%s | target_date=%s | lookback_days=%s",
+        "Load environment and initialize pipeline | mode=%s | target_date=%s | lookback_days=%s | start_date=%s",
         args.mode,
         args.target_date,
         args.lookback_days,
+        args.start_date,
     )
     spark = get_spark_session()
 
@@ -224,6 +230,11 @@ def main() -> None:
     logger.info("Write path: %s", silver_output_path)
 
     target_date = datetime.strptime(args.target_date, "%Y-%m-%d").date()
+    start_date = (
+        datetime.strptime(args.start_date, "%Y-%m-%d").date() if args.start_date else None
+    )
+    if start_date and start_date > target_date:
+        raise ValueError("--start-date must be <= --target-date")
 
     t = step_timer("Resolve raw input paths")
     raw_input_paths = build_raw_input_paths(
@@ -282,6 +293,9 @@ def main() -> None:
             lower_bound,
             target_date + timedelta(days=1),
         )
+    if start_date:
+        df = df.filter(col("event_time") >= F.to_timestamp(F.lit(str(start_date))))
+        logger.info("Applied start-date lower bound filter: event_time >= %s", start_date)
     finish_step("Apply mode-specific input filter", t)
 
     t = step_timer("Clean nulls and normalize volume")
@@ -361,6 +375,7 @@ def main() -> None:
             "run_date": run_date,
             "mode": args.mode,
             "target_date": str(target_date),
+            "start_date": str(start_date) if start_date else None,
         }
     ]
     (
@@ -382,13 +397,18 @@ def main() -> None:
     check_critical_rule(metrics, args.mode)
 
     t = step_timer("Write silver parquet")
-    spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-    (
+    writer = (
         df_output.repartition(4, "trade_date", "ticker")
         .write.mode("overwrite")
         .partitionBy("trade_date", "ticker")
-        .parquet(silver_output_path)
     )
+    if args.mode == "incremental":
+        spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+        writer.parquet(silver_output_path)
+    else:
+        spark.conf.set("spark.sql.sources.partitionOverwriteMode", "static")
+        # In full mode we overwrite the whole Silver dataset to avoid keeping stale old partitions.
+        writer.parquet(silver_output_path)
     finish_step("Write silver parquet", t)
 
     t = step_timer("Count rows")

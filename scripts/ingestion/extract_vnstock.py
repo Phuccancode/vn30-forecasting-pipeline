@@ -130,9 +130,15 @@ def process_and_store_locally(df: pd.DataFrame, ticker: str) -> int:
 def main():
     parser = argparse.ArgumentParser(description="Extract VN30 data from vnstock API")
     parser.add_argument("--mode", type=str, choices=["daily", "backfill"], required=True,
-                        help="Execution mode: 'daily' (yesterday/today data) or 'backfill' (5 years historical)")
+                        help="Execution mode: 'daily' (recent window) or 'backfill' (5 years/default or --start-date custom window)")
     parser.add_argument("--date", type=str, default=datetime.today().strftime('%Y-%m-%d'),
                         help="Target date for data fetching (YYYY-MM-DD). Defaults to today.")
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        default=None,
+        help="Optional lower bound date (YYYY-MM-DD). Useful for custom backfill window.",
+    )
     parser.add_argument("--batch-size", type=int, default=50,
                         help="Number of tickers per ingestion/upload batch.")
     parser.add_argument("--upload-workers", type=int, default=8,
@@ -151,13 +157,19 @@ def main():
 
     if args.mode == "backfill":
         target_dt = datetime.strptime(target_date, "%Y-%m-%d")
-        start_date = f"{target_dt.year - 5}-{target_dt.month:02d}-{target_dt.day:02d}"
+        if args.start_date:
+            start_date = datetime.strptime(args.start_date, "%Y-%m-%d").strftime("%Y-%m-%d")
+        else:
+            start_date = f"{target_dt.year - 5}-{target_dt.month:02d}-{target_dt.day:02d}"
         logger.info(f"Running BACKFILL mode: fetching data from {start_date} to {target_date}")
     else:
         target_dt = datetime.strptime(target_date, "%Y-%m-%d")
         ts = pd.Timestamp(target_dt)
         start_date = (ts - pd.Timedelta(days=3)).strftime("%Y-%m-%d")
         logger.info(f"Running DAILY mode for target date {target_date}")
+
+    if datetime.strptime(start_date, "%Y-%m-%d") > datetime.strptime(target_date, "%Y-%m-%d"):
+        raise ValueError("--start-date must be <= --date")
 
     total_written = 0
     total_uploaded_batches = 0
