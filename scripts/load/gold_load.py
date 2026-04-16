@@ -488,7 +488,6 @@ def load_staging_tables(
                 schema="dbo",
                 if_exists="append",
                 index=False,
-                method="multi",
                 chunksize=5000,
             )
             dim_date.to_sql(
@@ -497,7 +496,6 @@ def load_staging_tables(
                 schema="dbo",
                 if_exists="append",
                 index=False,
-                method="multi",
                 chunksize=5000,
             )
             fact[
@@ -522,8 +520,7 @@ def load_staging_tables(
                 schema="dbo",
                 if_exists="append",
                 index=False,
-                method="multi",
-                chunksize=5000,
+                chunksize=1000,
             )
 
     run_with_sql_retry(
