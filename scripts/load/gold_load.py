@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.storagelevel import StorageLevel
-from sqlalchemy import DateTime, create_engine, text
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
@@ -433,13 +433,60 @@ def load_staging_tables(
     dim_date: pd.DataFrame,
     fact: pd.DataFrame,
 ) -> None:
+    staging_ddl_sql = """
+    IF OBJECT_ID('dbo.stg_dim_ticker', 'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.stg_dim_ticker (
+            ticker NVARCHAR(16) NOT NULL
+        );
+    END;
+
+    IF OBJECT_ID('dbo.stg_dim_date', 'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.stg_dim_date (
+            date_key INT NOT NULL,
+            full_date DATE NOT NULL,
+            [year] SMALLINT NOT NULL,
+            [quarter] TINYINT NOT NULL,
+            [month] TINYINT NOT NULL,
+            [day] TINYINT NOT NULL,
+            day_of_week TINYINT NOT NULL,
+            is_weekend BIT NOT NULL
+        );
+    END;
+
+    IF OBJECT_ID('dbo.stg_fact_prices', 'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.stg_fact_prices (
+            ticker NVARCHAR(16) NOT NULL,
+            full_date DATE NOT NULL,
+            event_time DATETIME2(0) NOT NULL,
+            open_price DECIMAL(19,4) NOT NULL,
+            high_price DECIMAL(19,4) NOT NULL,
+            low_price DECIMAL(19,4) NOT NULL,
+            close_price DECIMAL(19,4) NOT NULL,
+            volume BIGINT NOT NULL,
+            ma10 DECIMAL(19,4) NULL,
+            ma20 DECIMAL(19,4) NULL,
+            ma50 DECIMAL(19,4) NULL,
+            ma200 DECIMAL(19,4) NULL,
+            load_ts_utc DATETIME2(0) NOT NULL
+        );
+    END;
+    """
+
     def _run() -> None:
         with engine.begin() as conn:
+            conn.execute(text(staging_ddl_sql))
+            conn.execute(text("TRUNCATE TABLE dbo.stg_dim_ticker;"))
+            conn.execute(text("TRUNCATE TABLE dbo.stg_dim_date;"))
+            conn.execute(text("TRUNCATE TABLE dbo.stg_fact_prices;"))
+
             dim_ticker.to_sql(
                 "stg_dim_ticker",
                 conn,
                 schema="dbo",
-                if_exists="replace",
+                if_exists="append",
                 index=False,
                 method="multi",
                 chunksize=5000,
@@ -448,20 +495,35 @@ def load_staging_tables(
                 "stg_dim_date",
                 conn,
                 schema="dbo",
-                if_exists="replace",
+                if_exists="append",
                 index=False,
                 method="multi",
                 chunksize=5000,
             )
-            fact.to_sql(
+            fact[
+                [
+                    "ticker",
+                    "full_date",
+                    "event_time",
+                    "open_price",
+                    "high_price",
+                    "low_price",
+                    "close_price",
+                    "volume",
+                    "ma10",
+                    "ma20",
+                    "ma50",
+                    "ma200",
+                    "load_ts_utc",
+                ]
+            ].to_sql(
                 "stg_fact_prices",
                 conn,
                 schema="dbo",
-                if_exists="replace",
+                if_exists="append",
                 index=False,
                 method="multi",
                 chunksize=5000,
-                dtype={"load_ts_utc": DateTime()},
             )
 
     run_with_sql_retry(
