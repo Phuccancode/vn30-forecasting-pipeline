@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.storagelevel import StorageLevel
-from sqlalchemy import create_engine, text
+from sqlalchemy import DateTime, create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
@@ -322,7 +322,7 @@ def build_gold_dataframes(silver_df: DataFrame) -> tuple[pd.DataFrame, pd.DataFr
     fact["ticker"] = fact["ticker"].astype(str)
     fact["event_time"] = pd.to_datetime(fact["event_time"])
     fact["full_date"] = pd.to_datetime(fact["full_date"]).dt.date
-    fact["load_ts_utc"] = pd.Timestamp.utcnow().floor("s")
+    fact["load_ts_utc"] = pd.Timestamp.now(tz="UTC").floor("s").tz_localize(None)
 
     dim_ticker = (
         fact[["ticker"]]
@@ -461,6 +461,7 @@ def load_staging_tables(
                 index=False,
                 method="multi",
                 chunksize=5000,
+                dtype={"load_ts_utc": DateTime()},
             )
 
     run_with_sql_retry(
