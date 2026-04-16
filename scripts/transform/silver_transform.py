@@ -122,6 +122,7 @@ def get_spark_session() -> SparkSession:
         account_key,
     )
     spark.conf.set("spark.sql.session.timeZone", "Asia/Ho_Chi_Minh")
+    spark.conf.set("spark.sql.shuffle.partitions", "8")
     spark.sparkContext.setLogLevel(os.getenv("SPARK_LOG_LEVEL", "WARN"))
     finish_step("Create Spark session", t)
     return spark

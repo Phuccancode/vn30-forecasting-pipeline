@@ -13,6 +13,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.storagelevel import StorageLevel
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
@@ -183,7 +184,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch-days",
         type=int,
-        default=31,
+        default=93,
         help="Number of days per Gold batch to limit memory usage.",
     )
     return parser.parse_args()
@@ -204,6 +205,10 @@ def get_spark_session(storage_account: str, account_key: str) -> SparkSession:
         f"fs.azure.account.key.{storage_account}.dfs.core.windows.net", account_key
     )
     spark.conf.set("spark.sql.session.timeZone", "Asia/Ho_Chi_Minh")
+    spark.conf.set(
+        "spark.sql.shuffle.partitions",
+        os.getenv("SPARK_SQL_SHUFFLE_PARTITIONS", "4"),
+    )
     spark.sparkContext.setLogLevel(os.getenv("SPARK_LOG_LEVEL", "WARN"))
     return spark
 
@@ -236,15 +241,36 @@ def parse_optional_date(value: str | None, field_name: str) -> date | None:
         raise ValueError(f"Invalid {field_name}: {value}. Expected YYYY-MM-DD") from exc
 
 
+def prepare_gold_base_dataframe(silver_df: DataFrame) -> DataFrame:
+    return (
+        silver_df.select(
+            F.col("ticker").cast("string").alias("ticker"),
+            F.col("event_time").cast("timestamp").alias("event_time"),
+            F.col("open").cast("double").alias("open_price"),
+            F.col("high").cast("double").alias("high_price"),
+            F.col("low").cast("double").alias("low_price"),
+            F.col("close").cast("double").alias("close_price"),
+            F.col("volume").cast("long").alias("volume"),
+            F.col("ma10").cast("double").alias("ma10"),
+            F.col("ma20").cast("double").alias("ma20"),
+            F.col("ma50").cast("double").alias("ma50"),
+            F.col("ma200").cast("double").alias("ma200"),
+        )
+        .withColumn("full_date", F.to_date("event_time"))
+        .dropna(subset=["ticker", "event_time", "full_date"])
+        .dropDuplicates(["ticker", "event_time"])
+    )
+
+
 def resolve_load_window(
-    silver_df: DataFrame,
+    gold_base_df: DataFrame,
     start_date_arg: date | None,
     end_date_arg: date | None,
 ) -> tuple[date, date]:
     stats = (
-        silver_df.select(
-            F.min(F.to_date("event_time")).alias("min_date"),
-            F.max(F.to_date("event_time")).alias("max_date"),
+        gold_base_df.select(
+            F.min("full_date").alias("min_date"),
+            F.max("full_date").alias("max_date"),
         )
         .collect()[0]
     )
@@ -261,67 +287,72 @@ def resolve_load_window(
 
 
 def build_gold_dataframes(silver_df: DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    base = (
-        silver_df.select(
-            "ticker",
-            "event_time",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "ma10",
-            "ma20",
-            "ma50",
-            "ma200",
+    fact = silver_df.select(
+        "ticker",
+        "full_date",
+        "event_time",
+        "open_price",
+        "high_price",
+        "low_price",
+        "close_price",
+        "volume",
+        "ma10",
+        "ma20",
+        "ma50",
+        "ma200",
+    ).toPandas()
+
+    if fact.empty:
+        empty_ticker = pd.DataFrame(columns=["ticker"])
+        empty_date = pd.DataFrame(
+            columns=[
+                "date_key",
+                "full_date",
+                "year",
+                "quarter",
+                "month",
+                "day",
+                "day_of_week",
+                "is_weekend",
+            ]
         )
-        .withColumn("full_date", F.to_date("event_time"))
-        .dropna(subset=["ticker", "event_time", "full_date"])
-    )
+        return empty_ticker, empty_date, fact
+
+    fact = fact.drop_duplicates(subset=["ticker", "event_time"], keep="last")
+    fact["ticker"] = fact["ticker"].astype(str)
+    fact["event_time"] = pd.to_datetime(fact["event_time"])
+    fact["full_date"] = pd.to_datetime(fact["full_date"]).dt.date
+    fact["load_ts_utc"] = pd.Timestamp.utcnow().floor("s")
 
     dim_ticker = (
-        base.select(F.col("ticker").cast("string"))
+        fact[["ticker"]]
         .dropna(subset=["ticker"])
-        .dropDuplicates(["ticker"])
-        .orderBy("ticker")
+        .drop_duplicates(subset=["ticker"])
+        .sort_values("ticker")
+        .reset_index(drop=True)
     )
 
     dim_date = (
-        base.select("full_date")
-        .dropDuplicates(["full_date"])
-        .withColumn("date_key", F.date_format("full_date", "yyyyMMdd").cast("int"))
-        .withColumn("year", F.year("full_date").cast("smallint"))
-        .withColumn("quarter", F.quarter("full_date").cast("tinyint"))
-        .withColumn("month", F.month("full_date").cast("tinyint"))
-        .withColumn("day", F.dayofmonth("full_date").cast("tinyint"))
-        .withColumn("day_of_week", F.dayofweek("full_date").cast("tinyint"))
-        .withColumn(
-            "is_weekend",
-            F.when(F.dayofweek("full_date").isin(1, 7), F.lit(1)).otherwise(F.lit(0)),
-        )
-        .orderBy("full_date")
+        fact[["full_date"]]
+        .dropna(subset=["full_date"])
+        .drop_duplicates(subset=["full_date"])
+        .sort_values("full_date")
+        .reset_index(drop=True)
     )
+    dt = pd.to_datetime(dim_date["full_date"])
+    day_of_week = ((dt.dt.dayofweek + 1) % 7) + 1
+    dim_date["date_key"] = dt.dt.strftime("%Y%m%d").astype(int)
+    dim_date["year"] = dt.dt.year.astype("int16")
+    dim_date["quarter"] = dt.dt.quarter.astype("int8")
+    dim_date["month"] = dt.dt.month.astype("int8")
+    dim_date["day"] = dt.dt.day.astype("int8")
+    dim_date["day_of_week"] = day_of_week.astype("int8")
+    dim_date["is_weekend"] = day_of_week.isin([1, 7]).astype("int8")
+    dim_date = dim_date[
+        ["date_key", "full_date", "year", "quarter", "month", "day", "day_of_week", "is_weekend"]
+    ]
 
-    fact = (
-        base.select(
-            F.col("ticker").cast("string").alias("ticker"),
-            F.col("full_date").alias("full_date"),
-            F.col("event_time").alias("event_time"),
-            F.col("open").cast("double").alias("open_price"),
-            F.col("high").cast("double").alias("high_price"),
-            F.col("low").cast("double").alias("low_price"),
-            F.col("close").cast("double").alias("close_price"),
-            F.col("volume").cast("long").alias("volume"),
-            F.col("ma10").cast("double").alias("ma10"),
-            F.col("ma20").cast("double").alias("ma20"),
-            F.col("ma50").cast("double").alias("ma50"),
-            F.col("ma200").cast("double").alias("ma200"),
-            F.current_timestamp().alias("load_ts_utc"),
-        )
-        .dropDuplicates(["ticker", "event_time"])
-    )
-
-    return dim_ticker.toPandas(), dim_date.toPandas(), fact.toPandas()
+    return dim_ticker, dim_date, fact
 
 
 def create_engine_from_odbc(odbc_connection_string: str) -> Engine:
@@ -403,9 +434,34 @@ def load_staging_tables(
     fact: pd.DataFrame,
 ) -> None:
     def _run() -> None:
-        dim_ticker.to_sql("stg_dim_ticker", engine, schema="dbo", if_exists="replace", index=False)
-        dim_date.to_sql("stg_dim_date", engine, schema="dbo", if_exists="replace", index=False)
-        fact.to_sql("stg_fact_prices", engine, schema="dbo", if_exists="replace", index=False)
+        with engine.begin() as conn:
+            dim_ticker.to_sql(
+                "stg_dim_ticker",
+                conn,
+                schema="dbo",
+                if_exists="replace",
+                index=False,
+                method="multi",
+                chunksize=5000,
+            )
+            dim_date.to_sql(
+                "stg_dim_date",
+                conn,
+                schema="dbo",
+                if_exists="replace",
+                index=False,
+                method="multi",
+                chunksize=5000,
+            )
+            fact.to_sql(
+                "stg_fact_prices",
+                conn,
+                schema="dbo",
+                if_exists="replace",
+                index=False,
+                method="multi",
+                chunksize=5000,
+            )
 
     run_with_sql_retry(
         "Load staging tables",
@@ -622,6 +678,14 @@ def main() -> None:
         silver_df = read_silver_dataframe(spark, storage_account)
         finish_step("Read Silver dataset", t)
 
+        t = step_timer("Prepare and cache Gold base dataframe")
+        gold_base_df = prepare_gold_base_dataframe(silver_df).persist(StorageLevel.MEMORY_AND_DISK)
+        gold_base_rows = gold_base_df.count()
+        finish_step("Prepare and cache Gold base dataframe", t)
+        logger.info("Gold base rows: %s", gold_base_rows)
+        if gold_base_rows == 0:
+            raise RuntimeError("Silver dataset yielded no rows for Gold base dataframe")
+
         t = step_timer("Open SQL engine")
         engine = create_engine_from_odbc(sql_conn_str)
         finish_step("Open SQL engine", t)
@@ -631,7 +695,7 @@ def main() -> None:
         finish_step("Apply Gold DDL", t)
 
         window_start, window_end = resolve_load_window(
-            silver_df=silver_df,
+            gold_base_df=gold_base_df,
             start_date_arg=start_date_arg,
             end_date_arg=end_date_arg,
         )
@@ -651,39 +715,42 @@ def main() -> None:
             batch_end = min(window_end, batch_start + timedelta(days=args.batch_days - 1))
             logger.info("START: Gold batch %s | [%s, %s]", total_batches, batch_start, batch_end)
 
-            batch_df = silver_df.filter(
-                (F.to_date("event_time") >= F.to_date(F.lit(str(batch_start))))
-                & (F.to_date("event_time") <= F.to_date(F.lit(str(batch_end))))
-            )
-            has_rows = batch_df.limit(1).count() > 0
-            if not has_rows:
-                logger.info("SKIP: Gold batch %s has no rows", total_batches)
-                cursor = batch_end + timedelta(days=1)
-                continue
+            batch_df = gold_base_df.filter(
+                (F.col("full_date") >= F.lit(batch_start)) & (F.col("full_date") <= F.lit(batch_end))
+            ).persist(StorageLevel.MEMORY_AND_DISK)
+            try:
+                batch_row_count = batch_df.count()
+                if batch_row_count == 0:
+                    logger.info("SKIP: Gold batch %s has no rows", total_batches)
+                    cursor = batch_end + timedelta(days=1)
+                    continue
 
-            t = step_timer(f"Build Gold source dataframes for batch {total_batches}")
-            dim_ticker, dim_date, fact = build_gold_dataframes(batch_df)
-            finish_step(f"Build Gold source dataframes for batch {total_batches}", t)
-            logger.info(
-                "Batch %s prepared rows - dim_ticker: %s | dim_date: %s | fact: %s",
-                total_batches,
-                len(dim_ticker),
-                len(dim_date),
-                len(fact),
-            )
-            if fact.empty:
-                logger.info("SKIP: Gold batch %s has empty fact dataframe", total_batches)
-                cursor = batch_end + timedelta(days=1)
-                continue
+                t = step_timer(f"Build Gold source dataframes for batch {total_batches}")
+                dim_ticker, dim_date, fact = build_gold_dataframes(batch_df)
+                finish_step(f"Build Gold source dataframes for batch {total_batches}", t)
+                logger.info(
+                    "Batch %s prepared rows - spark_batch_rows: %s | dim_ticker: %s | dim_date: %s | fact: %s",
+                    total_batches,
+                    batch_row_count,
+                    len(dim_ticker),
+                    len(dim_date),
+                    len(fact),
+                )
+                if fact.empty:
+                    logger.info("SKIP: Gold batch %s has empty fact dataframe", total_batches)
+                    cursor = batch_end + timedelta(days=1)
+                    continue
 
-            t = step_timer(f"Load staging tables for batch {total_batches}")
-            load_staging_tables(engine, dim_ticker, dim_date, fact)
-            finish_step(f"Load staging tables for batch {total_batches}", t)
+                t = step_timer(f"Load staging tables for batch {total_batches}")
+                load_staging_tables(engine, dim_ticker, dim_date, fact)
+                finish_step(f"Load staging tables for batch {total_batches}", t)
 
-            t = step_timer(f"Merge staging to Gold schema for batch {total_batches}")
-            merge_to_gold(engine)
-            finish_step(f"Merge staging to Gold schema for batch {total_batches}", t)
-            loaded_batches += 1
+                t = step_timer(f"Merge staging to Gold schema for batch {total_batches}")
+                merge_to_gold(engine)
+                finish_step(f"Merge staging to Gold schema for batch {total_batches}", t)
+                loaded_batches += 1
+            finally:
+                batch_df.unpersist()
 
             cursor = batch_end + timedelta(days=1)
 
@@ -700,6 +767,8 @@ def main() -> None:
         finish_step("Validate Gold outputs", t)
         logger.info("Gold modeling completed successfully")
     finally:
+        if "gold_base_df" in locals():
+            gold_base_df.unpersist()
         spark.stop()
 
 
