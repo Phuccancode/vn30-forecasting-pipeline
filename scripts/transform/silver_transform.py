@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql.functions import col
+from pyspark.sql.types import LongType, StringType, StructField, StructType
 
 load_dotenv()
 
@@ -369,18 +370,33 @@ def main() -> None:
     run_ts_utc = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     run_date = datetime.utcnow().strftime("%Y-%m-%d")
     t = step_timer("Write silver quality report")
-    quality_metrics = [
-        {
-            **metrics,
-            "run_ts_utc": run_ts_utc,
-            "run_date": run_date,
-            "mode": args.mode,
-            "target_date": str(target_date),
-            "start_date": str(start_date) if start_date else None,
-        }
-    ]
+    quality_metrics = {
+        **metrics,
+        "run_ts_utc": run_ts_utc,
+        "run_date": run_date,
+        "mode": args.mode,
+        "target_date": str(target_date),
+        "start_date": str(start_date) if start_date else None,
+    }
+    quality_schema = StructType(
+        [
+            StructField("total_rows", LongType(), False),
+            StructField("ticker_null_count", LongType(), False),
+            StructField("event_time_null_count", LongType(), False),
+            StructField("ohlc_null_count", LongType(), False),
+            StructField("invalid_price_count", LongType(), False),
+            StructField("invalid_ohlc_count", LongType(), False),
+            StructField("invalid_volume_count", LongType(), False),
+            StructField("duplicate_key_count", LongType(), False),
+            StructField("run_ts_utc", StringType(), False),
+            StructField("run_date", StringType(), False),
+            StructField("mode", StringType(), False),
+            StructField("target_date", StringType(), False),
+            StructField("start_date", StringType(), True),
+        ]
+    )
     (
-        spark.createDataFrame(quality_metrics)
+        spark.createDataFrame([quality_metrics], schema=quality_schema)
         .write.mode("append")
         .partitionBy("run_date")
         .parquet(silver_quality_output_path)
